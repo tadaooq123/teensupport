@@ -1,5 +1,5 @@
-// Серверная функция Netlify: прячет ключ Gemini и отвечает сайту.
-// Ключ задаётся в Netlify: Site configuration → Environment variables → GEMINI_API_KEY
+// Серверная функция Netlify: отвечает сайту через Netlify AI Gateway (модель Gemini).
+// Ключ не нужен — Netlify сам передаёт функции доступ к AI Gateway.
 
 const SYSTEM_CHAT = `Ты — ИИ-помощник в чате учебного сайта TeenSupport: анонимная психологическая поддержка подростков 13–19 лет в Казахстане.
 Правила:
@@ -17,25 +17,35 @@ const json = (obj, status = 200) =>
 
 const clip = (s, n) => String(s ?? "").slice(0, n);
 
-async function gemini(key, system, contents, wantJson) {
-  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-  const generationConfig = { temperature: wantJson ? 0.2 : 0.7, maxOutputTokens: 600 };
+function gatewayAuth() {
+  const key = process.env.NETLIFY_AI_GATEWAY_KEY;
+  const url = process.env.NETLIFY_AI_GATEWAY_URL;
+  if (key && url) return { key, base: url.replace(/\/$/, "") };
+  return null;
+}
+
+async function gemini(auth, system, contents, wantJson) {
+  const model = process.env.GEMINI_MODEL || "gemini-3.5-flash";
+  const generationConfig = { temperature: wantJson ? 0.2 : 0.7, maxOutputTokens: 800, thinkingConfig: { thinkingLevel: "low" } };
   if (wantJson) generationConfig.responseMimeType = "application/json";
-  if (model.startsWith("gemini-2.5-flash")) generationConfig.thinkingConfig = { thinkingBudget: 0 };
-  const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+  const { key, base } = auth;
+  const r = await fetch(`${base}/v1beta/models/${model}:generateContent`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-goog-api-key": key },
     body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents, generationConfig }),
   });
   if (r.status === 429) return { status: 429 };
-  if (!r.ok) return { status: 502, detail: await r.text() };
+  if (!r.ok) {
+    console.error("AI Gateway error", r.status, (await r.text()).slice(0, 500));
+    return { status: 502 };
+  }
   const data = await r.json();
   const text = (data.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("").trim();
   return { status: 200, text };
 }
 
 export default async (req) => {
-  const key = process.env.GEMINI_API_KEY;
+  const key = gatewayAuth();
   if (req.method === "GET") return json({ ai: Boolean(key) });
   if (req.method !== "POST") return json({ error: "method" }, 405);
   if (!key) return json({ error: "no_key" }, 503);
