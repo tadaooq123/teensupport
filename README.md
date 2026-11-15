@@ -5,22 +5,15 @@
 ## Что внутри
 
 - `index.html` — весь сайт (страницы, чат, запись к специалистам, быстрый выход).
-- `netlify/functions/chat.mjs` — серверная функция для ИИ. Она хранит ключ Google Gemini у себя, поэтому посетители сайта его не видят.
+- `netlify/functions/chat.mjs` — серверная функция для ИИ. Работает через Netlify AI Gateway, поэтому ключ API не нужен. Если задан `GEMINI_API_KEY`, он используется как запасной вариант.
 - `netlify.toml` — настройки для Netlify.
 
 ## Как выложить сайт с работающим ИИ
 
-1. Получите бесплатный ключ Gemini: https://aistudio.google.com/apikey (кнопка **Create API key**).
-2. Зайдите на https://app.netlify.com и войдите через GitHub.
-3. **Add new site → Import an existing project → GitHub** и выберите этот репозиторий. Настройки сборки менять не нужно, нажмите **Deploy**.
-4. В настройках сайта откройте **Site configuration → Environment variables → Add a variable**:
-   - Key: `GEMINI_API_KEY`
-   - Value: ваш ключ из шага 1
-5. **Deploys → Trigger deploy → Deploy site**. Готово: ссылка вида `https://…netlify.app` откроется у любого человека.
+1. Подключите репозиторий в https://app.netlify.com (**Add new site → Import an existing project → GitHub**) и нажмите **Deploy**.
+2. Готово: ИИ работает через Netlify AI Gateway сразу после первого продакшн-деплоя, никакие ключи не нужны.
 
-Без ключа сайт тоже работает, только чат отвечает заготовленными фразами, а подбор специалиста скрыт.
-
-Ключ никогда не вставляйте в `index.html` и не коммитьте в репозиторий.
+Ключи никогда не вставляйте в `index.html` и не коммитьте в репозиторий.
 
 ## Номера помощи
 
