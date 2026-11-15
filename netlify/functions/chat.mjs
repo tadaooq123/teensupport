@@ -1,5 +1,5 @@
-// Серверная функция Netlify: прячет ключ Gemini и отвечает сайту.
-// Ключ задаётся в Netlify: Site configuration → Environment variables → GEMINI_API_KEY
+// Серверная функция Netlify: отвечает сайту через Netlify AI Gateway (без ключей).
+// Если задан GEMINI_API_KEY, он используется как запасной вариант.
 
 const SYSTEM_CHAT = `Ты — ИИ-помощник в чате учебного сайта TeenSupport: анонимная психологическая поддержка подростков 13–19 лет в Казахстане.
 Правила:
@@ -17,28 +17,67 @@ const json = (obj, status = 200) =>
 
 const clip = (s, n) => String(s ?? "").slice(0, n);
 
+// Основной путь: Netlify AI Gateway (ключ не нужен, Netlify подставляет его сам).
+// Запасной путь: собственный ключ Gemini, если шлюз недоступен.
+async function claude(system, contents, wantJson) {
+  const url = process.env.NETLIFY_AI_GATEWAY_URL;
+  const key = process.env.NETLIFY_AI_GATEWAY_KEY;
+  if (!url || !key) return { status: 503 };
+  const messages = contents.map((c) => ({
+    role: c.role === "model" ? "assistant" : "user",
+    content: c.parts.map((p) => p.text).join("\n"),
+  }));
+  const r = await fetch(`${url.replace(/\/$/, "")}/anthropic/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${key}`, "anthropic-version": "2023-06-01" },
+    body: JSON.stringify({
+      model: process.env.AI_MODEL || "claude-haiku-4-5",
+      max_tokens: 600,
+      temperature: wantJson ? 0.2 : 0.7,
+      system: wantJson ? system + "\nВыведи только JSON без пояснений и без markdown." : system,
+      messages,
+    }),
+  });
+  if (r.status === 429) return { status: 429 };
+  if (!r.ok) { console.error("ai gateway", r.status, (await r.text()).slice(0, 500)); return { status: 502 }; }
+  const data = await r.json();
+  const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("").trim();
+  return { status: 200, text };
+}
+
 async function gemini(key, system, contents, wantJson) {
-  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const model = process.env.GEMINI_MODEL || "gemini-3-flash-preview";
   const generationConfig = { temperature: wantJson ? 0.2 : 0.7, maxOutputTokens: 600 };
   if (wantJson) generationConfig.responseMimeType = "application/json";
-  if (model.startsWith("gemini-2.5-flash")) generationConfig.thinkingConfig = { thinkingBudget: 0 };
   const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-goog-api-key": key },
     body: JSON.stringify({ systemInstruction: { parts: [{ text: system }] }, contents, generationConfig }),
   });
   if (r.status === 429) return { status: 429 };
-  if (!r.ok) return { status: 502, detail: await r.text() };
+  if (!r.ok) { console.error("gemini", r.status, (await r.text()).slice(0, 500)); return { status: 502 }; }
   const data = await r.json();
   const text = (data.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("").trim();
   return { status: 200, text };
 }
 
-export default async (req) => {
+async function ask(system, contents, wantJson) {
+  const out = await claude(system, contents, wantJson);
+  if (out.status === 200) return out;
   const key = process.env.GEMINI_API_KEY;
-  if (req.method === "GET") return json({ ai: Boolean(key) });
+  if (key) {
+    const alt = await gemini(key, system, contents, wantJson);
+    if (alt.status === 200) return alt;
+    return out.status === 503 ? alt : out;
+  }
+  return out;
+}
+
+export default async (req) => {
+  const available = Boolean(process.env.NETLIFY_AI_GATEWAY_KEY || process.env.GEMINI_API_KEY);
+  if (req.method === "GET") return json({ ai: available });
   if (req.method !== "POST") return json({ error: "method" }, 405);
-  if (!key) return json({ error: "no_key" }, 503);
+  if (!available) return json({ error: "no_key" }, 503);
 
   let body;
   try { body = await req.json(); } catch { return json({ error: "bad_json" }, 400); }
@@ -50,7 +89,7 @@ export default async (req) => {
       .map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: clip(m.content, 800) }] }));
     while (turns.length && turns[0].role !== "user") turns.shift();
     if (!turns.length || turns[turns.length - 1].role !== "user") return json({ error: "bad_turns" }, 400);
-    const out = await gemini(key, SYSTEM_CHAT, turns, false);
+    const out = await ask(SYSTEM_CHAT, turns, false);
     if (out.status !== 200) return json({ error: "upstream" }, out.status);
     return json({ text: out.text || "" });
   }
@@ -63,7 +102,7 @@ export default async (req) => {
     const lang = body.lang === "kk" ? "казахском" : "русском";
     const system = `Ты подбираешь психолога для подростка на сайте TeenSupport. Отвечай только JSON вида {"picks":[{"i":0,"why":"..."}],"urgent":false}. Выбери 1 или 2 самых подходящих специалиста из списка. Поле why — одно короткое тёплое предложение на ${lang} языке, на «ты». urgent=true, если в запросе есть мысли о смерти, самоповреждение, насилие или угроза жизни.`;
     const prompt = `Специалисты: ${JSON.stringify(specs)}\nЗапрос подростка: """${clip(body.query, 500)}"""`;
-    const out = await gemini(key, system, [{ role: "user", parts: [{ text: prompt }] }], true);
+    const out = await ask(system, [{ role: "user", parts: [{ text: prompt }] }], true);
     if (out.status !== 200) return json({ error: "upstream" }, out.status);
     let parsed = null;
     try { parsed = JSON.parse(out.text); } catch { const m = out.text.match(/\{[\s\S]*\}/); if (m) try { parsed = JSON.parse(m[0]); } catch {} }
